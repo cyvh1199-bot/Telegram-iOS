@@ -22,8 +22,18 @@ jobs:
 
       - name: Select Xcode
         run: |
-          XCODE_VERSION=$(python3 -c 'import json;print(json.load(open("versions.json"))["xcode"])')
-          sudo xcode-select -s /Applications/Xcode_$XCODE_VERSION.app/Contents/Developer
+          WANT=$(python3 -c 'import json;print(json.load(open("versions.json"))["xcode"])')
+          echo "Telegram wants Xcode $WANT"
+          echo "Installed Xcodes:"; ls -d /Applications/Xcode*.app
+          if [ -d "/Applications/Xcode_$WANT.app" ]; then
+            PICK="/Applications/Xcode_$WANT.app"
+            echo "XCODE_OVERRIDE=" >> $GITHUB_ENV
+          else
+            PICK=$(ls -d /Applications/Xcode_[0-9]*.app | sed -E 's/.*Xcode_([0-9.]+)\.app/\1 &/' | sort -t. -k1,1n -k2,2n -k3,3n | tail -1 | cut -d' ' -f2)
+            echo "Exact Xcode not found, using newest: $PICK"
+            echo "XCODE_OVERRIDE=--overrideXcodeVersion" >> $GITHUB_ENV
+          fi
+          sudo xcode-select -s "$PICK/Contents/Developer"
           xcodebuild -version
 
       - name: Copy sources to stable path
@@ -59,7 +69,7 @@ jobs:
           cd /Users/Shared/telegram-ios
           BUILD_NUMBER=$(( $(git rev-list --count HEAD) + $(cat build_number_offset) ))
           python3 build-system/Make/ImportCertificates.py --path build-system/fake-codesigning/certs
-          python3 -u build-system/Make/Make.py \
+          python3 -u build-system/Make/Make.py $XCODE_OVERRIDE \
             --bazelUserRoot="/private/var/tmp/_bazel_containerhost" \
             build \
             --configurationPath="/Users/Shared/mod-configuration.json" \
