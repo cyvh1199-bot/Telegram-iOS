@@ -14,6 +14,26 @@ jobs:
           submodules: false
           fetch-depth: 0
 
+      - name: Pin source to a version matching installed Xcode
+        run: |
+          INSTALLED=$(ls -d /Applications/Xcode_[0-9]*.app | sed -E 's/.*Xcode_([0-9.]+)\.app/\1/')
+          echo "Installed Xcodes:"; echo "$INSTALLED"
+          getx() { git show "$1:versions.json" | python3 -c 'import json,sys;d=json.load(sys.stdin);print(d.get("xcode","none"), d.get("app","?"))' 2>/dev/null || echo "none ?"; }
+          NEWER=""
+          for c in $(git log --first-parent --format=%H -- versions.json); do
+            read X APP <<< "$(getx $c)"
+            if echo "$INSTALLED" | grep -qx "$X"; then
+              if [ -z "$NEWER" ]; then TARGET=HEAD; else TARGET="$NEWER~1"; fi
+              TARGET=$(git rev-parse "$TARGET")
+              echo "Building Telegram $APP (Xcode $X) at commit $TARGET"
+              git checkout -q "$TARGET"
+              exit 0
+            fi
+            NEWER=$c
+          done
+          echo "No commit matches installed Xcode"
+          exit 1
+
       - name: Fetch submodules from official repos
         run: |
           git config --global url."https://github.com/TelegramMessenger/".insteadOf "https://github.com/${{ github.repository_owner }}/"
