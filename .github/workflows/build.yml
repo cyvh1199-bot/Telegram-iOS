@@ -20,19 +20,39 @@ jobs:
           echo "Installed Xcodes:"; echo "$INSTALLED"
           getx() { git show "$1:versions.json" | python3 -c 'import json,sys;d=json.load(sys.stdin);print(d.get("xcode","none"), d.get("app","?"))' 2>/dev/null || echo "none ?"; }
           NEWER=""
+          TARGET=""
           for c in $(git log --first-parent --format=%H -- versions.json); do
             read X APP <<< "$(getx $c)"
             if echo "$INSTALLED" | grep -qx "$X"; then
               if [ -z "$NEWER" ]; then TARGET=HEAD; else TARGET="$NEWER~1"; fi
               TARGET=$(git rev-parse "$TARGET")
-              echo "Building Telegram $APP (Xcode $X) at commit $TARGET"
-              git checkout -q "$TARGET"
-              exit 0
+              break
             fi
             NEWER=$c
           done
-          echo "No commit matches installed Xcode"
-          exit 1
+          if [ -z "$TARGET" ]; then echo "No commit matches installed Xcode"; exit 1; fi
+          echo "Version matching installed Xcode: $TARGET"
+
+          # Code may already use iOS 27+ APIs that the installed SDK lacks.
+          # Find the newest commit without such code.
+          has_new_sdk() { git grep -q -E 'available\(iOS 2[7-9]' "$1" -- '*.swift' '*.m' '*.mm' '*.h'; }
+          if has_new_sdk "$TARGET"; then
+            echo "Code at $TARGET uses iOS 27+ APIs, searching older commits..."
+            C=($(git rev-list --first-parent "$TARGET"))
+            bad=0; good=-1; step=50; i=50
+            while [ $i -lt ${#C[@]} ]; do
+              if has_new_sdk "${C[$i]}"; then bad=$i; step=$((step*2)); i=$((i+step)); else good=$i; break; fi
+            done
+            if [ $good -lt 0 ]; then echo "No suitable commit found"; exit 1; fi
+            while [ $((good-bad)) -gt 1 ]; do
+              mid=$(((good+bad)/2))
+              if has_new_sdk "${C[$mid]}"; then bad=$mid; else good=$mid; fi
+            done
+            TARGET=${C[$good]}
+          fi
+          read X APP <<< "$(getx $TARGET)"
+          echo "Building Telegram $APP (Xcode $X) at commit $TARGET"
+          git checkout -q "$TARGET"
 
       - name: Fetch submodules from official repos
         run: |
@@ -83,6 +103,19 @@ jobs:
           json.dump(cfg, open("/Users/Shared/mod-configuration.json", "w"), indent=2)
           EOF
 
+      - name: Restore build cache
+        uses: actions/cache/restore@v4
+        with:
+          path: /Users/Shared/bazel-cache
+          key: bazel-${{ github.run_id }}
+          restore-keys: bazel-
+
+      - name: Enable build cache
+        run: |
+          mkdir -p /Users/Shared/bazel-cache
+          echo "build --disk_cache=/Users/Shared/bazel-cache" >> ~/.bazelrc
+          echo "Cache size before build:"; du -sh /Users/Shared/bazel-cache
+
       - name: Build IPA
         run: |
           set -x
@@ -98,6 +131,41 @@ jobs:
             --buildNumber="$BUILD_NUMBER"
           mkdir -p /Users/Shared/out
           cp bazel-out/applebin_ios-ios_arm*-opt-ST-*/bin/Telegram/Telegram.ipa /Users/Shared/out/
+
+      - name: Trim build cache to fit GitHub limit
+        if: always()
+        run: |
+          df -h /Users/Shared
+          python3 - <<'EOF'
+          import os
+          root = "/Users/Shared/bazel-cache"
+          limit = 8 * 1024**3
+          files = []
+          for d, _, names in os.walk(root):
+              for n in names:
+                  p = os.path.join(d, n)
+                  try:
+                      st = os.stat(p)
+                      files.append((st.st_mtime, st.st_size, p))
+                  except OSError:
+                      pass
+          total = sum(f[1] for f in files)
+          print(f"Cache size: {total / 1024**3:.1f} GB")
+          files.sort()
+          for _, size, p in files:
+              if total <= limit:
+                  break
+              os.remove(p)
+              total -= size
+          print(f"After trim: {total / 1024**3:.1f} GB")
+          EOF
+
+      - name: Save build cache
+        if: always()
+        uses: actions/cache/save@v4
+        with:
+          path: /Users/Shared/bazel-cache
+          key: bazel-${{ github.run_id }}
 
       - name: Upload IPA
         uses: actions/upload-artifact@v4
